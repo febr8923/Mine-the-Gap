@@ -15,3 +15,4 @@ By accessing or using the data provided, you agree to the following terms and co
 
 ## Source of Data
 The data of this respository has been provided by [Swisscom](https://www.swisscom.ch/) submitting the challenge.
+
