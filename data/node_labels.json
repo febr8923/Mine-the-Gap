@@ -1,0 +1,13 @@
+{
+  "product": ["PRODUCT_OFFERING"],
+  "bng": ["NODE", "IMPACT_TOPOLOGY_ENTITY"],
+  "trunk": ["PORT", "IMPACT_TOPOLOGY_ENTITY"],
+  "concentrator": ["NODE", "IMPACT_TOPOLOGY_ENTITY"],
+  "port": ["PORT", "IMPACT_TOPOLOGY_ENTITY"],
+  "cpe": ["SERVICE", "IMPACT_TOPOLOGY_ENTITY"],
+  "sa": ["ORGANIZATION", "SERVICE_ACCOUNT"],
+  "poi": ["PRODUCT_OFFERING_INSTANCE", "SERVICE"],
+  "agreement": ["AGREEMENT"],
+  "location": ["LOCATION"],
+  "customer": ["CUSTOMER"]
+}
