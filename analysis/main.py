@@ -1,14 +1,12 @@
 import pandas as pd
 import torch
-from torch_geometric_temporal.data import TemporalData
-from torch_geometric_temporal.nn.recurrent import TGN
-from torch_geometric.nn import GATConv
+from torch_geometric.data import TemporalData
+from torch_geometric_temporal.nn.recurrent import TGCN
 import torch.nn.functional as F
 
-# Example data loading (user should replace with actual dataset loading code)
-# dataset = pd.read_csv("your_dataset.csv")
+# Example dataset loading (replace with actual)
+dataset = pd.read_csv("data/edge_events_clean.csv")
 
-# Assuming dataset has columns: src, dst, timestamp, label
 # Extract unique nodes and create mapping dictionaries
 nodes = pd.unique(dataset[["src", "dst"]].to_numpy().ravel())
 node2idx = {n: i for i, n in enumerate(nodes)}
@@ -22,54 +20,89 @@ dst = dataset["dst"].map(node2idx).to_numpy()
 t = dataset["timestamp"].astype(int).to_numpy()
 msg = pd.get_dummies(dataset["label"]).to_numpy()
 
-# Build TemporalData object
-data = TemporalData(
-    src=torch.from_numpy(src).long(),
-    dst=torch.from_numpy(dst).long(),
-    t=torch.from_numpy(t).long(),
-    msg=torch.from_numpy(msg).float(),
-)
+# Note: TGCN expects node features and edge_index per time step.
+# We will group data by timestamp slices for TemporalData
 
-# Define Temporal Graph Network (TGN) model
-class TGNModel(torch.nn.Module):
-    def __init__(self, node_count, memory_dim=32, message_dim=32, embedding_dim=32):
-        super(TGNModel, self).__init__()
-        self.tgn = TGN(node_count, memory_dim, message_dim, embedding_dim)
-        self.lin = torch.nn.Linear(embedding_dim, embedding_dim)
-    
-    def forward(self, src, dst, t):
-        # Get node embeddings from TGN
-        x_src, x_dst = self.tgn(src, dst, t)
-        # Compute embedding difference as feature
-        emb_diff = torch.abs(x_src - x_dst)
-        out = self.lin(emb_diff)
-        return out
+# Organize edge indices and features per timestamp
+max_time = t.max()
+edge_indices = []
+features = []
+
+for time in range(max_time + 1):
+    mask = (t == time)
+    if mask.sum() == 0:
+        # If no edges at this time, add empty tensor (handle carefully in training)
+        edge_index = torch.empty((2,0), dtype=torch.long)
+        feat = torch.empty((len(nodes), msg.shape[1]), dtype=torch.float)
+        feat[:] = 0
+    else:
+        # Build edge_index tensor (2 x num_edges)
+        e_src = torch.tensor(src[mask], dtype=torch.long)
+        e_dst = torch.tensor(dst[mask], dtype=torch.long)
+        edge_index = torch.stack([e_src, e_dst], dim=0)
+        # Initialize node features as zeros except for edges involved (simple example)
+        feat = torch.zeros((len(nodes), msg.shape[1]), dtype=torch.float)
+        for s, label_vec in zip(e_src, torch.tensor(msg[mask], dtype=torch.float)):
+            feat[s] = label_vec
+    edge_indices.append(edge_index)
+    features.append(feat)
+
+# Create TemporalData object with slices of features and edge indices
+data = TemporalData(x=features, edge_index=edge_indices)
+
+# Define TGCN model
+class TGCNModel(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super(TGCNModel, self).__init__()
+        self.tgcn = TGCN(in_channels, hidden_channels)
+        self.lin = torch.nn.Linear(hidden_channels, 1)  # Output anomaly score per node
+
+    def forward(self, x, edge_index):
+        h = self.tgcn(x, edge_index)
+        out = self.lin(h)
+        return out.squeeze()
 
 # Initialize model
-num_nodes = len(nodes)
-model = TGNModel(num_nodes)
+in_channels = msg.shape[1]
+hidden_channels = 32
+model = TGCNModel(in_channels, hidden_channels)
 
-# Define optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# Training loop for unsupervised anomaly detection
+# Training example for unsupervised anomaly detection
 def train(data, model, epochs=10):
     model.train()
     for epoch in range(epochs):
+        total_loss = 0
         optimizer.zero_grad()
-        out = model(data.src, data.dst, data.t)
-        # Use simple reconstruction loss (example)
-        loss = F.mse_loss(out, torch.zeros_like(out))
+        # TemporalData x and edge_index are lists of time steps
+        losses = []
+        for x_t, edge_index_t in zip(data.x, data.edge_index):
+            if edge_index_t.numel() == 0:
+                # Skip empty times to avoid error
+                continue
+            out = model(x_t, edge_index_t)
+            loss = F.mse_loss(out, torch.zeros_like(out))
+            losses.append(loss)
+        if not losses:
+            continue
+        loss = torch.stack(losses).mean()
         loss.backward()
         optimizer.step()
         print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item()}")
 
 train(data, model)
 
-# After training, get anomaly scores as embedding distances or reconstruction errors
+# To compute anomaly scores (example: absolute output as anomaly score per node)
 model.eval()
+anomaly_scores = []
 with torch.no_grad():
-    embeddings = model(data.src, data.dst, data.t)
-    anomaly_scores = torch.norm(embeddings, dim=1).cpu().numpy()
+    for x_t, edge_index_t in zip(data.x, data.edge_index):
+        if edge_index_t.numel() == 0:
+            anomaly_scores.append(torch.zeros(len(nodes)))
+            continue
+        out = model(x_t, edge_index_t)
+        scores = out.abs()
+        anomaly_scores.append(scores.cpu())
 
-# Output anomaly scores can be used for further analysis or flagged for investigation
+# anomaly_scores is a list of tensors per time step
