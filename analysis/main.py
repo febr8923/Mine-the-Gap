@@ -117,63 +117,64 @@ except FileNotFoundError:
     test_dataset = None
 
 if test_dataset is not None:
-    # 2. Preprocess the test data
-    # Filter out edges with nodes not seen during training
-    known_nodes = set(node2idx.keys())
-    original_rows = len(test_dataset)
-    test_dataset = test_dataset[test_dataset['src'].isin(known_nodes) & test_dataset['dst'].isin(known_nodes)]
-    if len(test_dataset) < original_rows:
-        print(f"Filtered out {original_rows - len(test_dataset)} edges with unknown nodes.")
-
-    # Map nodes to IDs using the same mapping from training
-    test_src = test_dataset["src"].map(node2idx).to_numpy()
-    test_dst = test_dataset["dst"].map(node2idx).to_numpy()
+    # Map nodes to IDs using the same mapping from training (no preprocessing)
+    # Handle cases where nodes don't exist in training data
+    test_src = test_dataset["src"].map(node2idx)
+    test_dst = test_dataset["dst"].map(node2idx)
+    
+    # Fill NaN values with -1 to indicate unknown nodes
+    test_src = test_src.fillna(-1).astype(int).to_numpy()
+    test_dst = test_dst.fillna(-1).astype(int).to_numpy()
     test_t = test_dataset["timestamp"].astype(int).to_numpy()
 
-    # 3. Calculate anomaly scores for each edge in the test set
-    model.eval()
-    edge_anomaly_scores = []
-    with torch.no_grad():
-        # Get node anomaly scores for all relevant timestamps
-        node_scores_per_t = {}
-        max_test_time = test_t.max()
-        for t_step in range(max_test_time + 1):
-            if t_step < len(anomaly_scores):
-                # Use pre-computed scores from the training data timeline if available
-                node_scores_per_t[t_step] = anomaly_scores[t_step]
-            else:
-                # If test data has timestamps beyond training data, we'd need to re-run or handle
-                # For simplicity, we assume test timestamps are within the trained range
-                node_scores_per_t[t_step] = torch.zeros(len(nodes)) # Default to zero score
+    # Check if we have any test data left after filtering
+    if len(test_dataset) == 0:
+        print("No test edges remain after filtering out unknown nodes.")
+    else:
+        # 3. Calculate anomaly scores for each edge in the test set
+        model.eval()
+        edge_anomaly_scores = []
+        with torch.no_grad():
+            # Get node anomaly scores for all relevant timestamps
+            node_scores_per_t = {}
+            max_test_time = test_t.max()
+            for t_step in range(max_test_time + 1):
+                if t_step < len(anomaly_scores):
+                    # Use pre-computed scores from the training data timeline if available
+                    node_scores_per_t[t_step] = anomaly_scores[t_step]
+                else:
+                    # If test data has timestamps beyond training data, we'd need to re-run or handle
+                    # For simplicity, we assume test timestamps are within the trained range
+                    node_scores_per_t[t_step] = torch.zeros(len(nodes)) # Default to zero score
 
-        # Calculate score for each edge by combining node scores
-        for i in range(len(test_dataset)):
-            t_val = test_t[i]
-            src_id = test_src[i]
-            dst_id = test_dst[i]
+            # Calculate score for each edge by combining node scores
+            for i in range(len(test_dataset)):
+                t_val = test_t[i]
+                src_id = test_src[i]
+                dst_id = test_dst[i]
 
-            # Get node scores at the specific timestamp of the edge
-            scores_at_t = node_scores_per_t.get(t_val, torch.zeros(len(nodes)))
-            src_score = scores_at_t[src_id].item()
-            dst_score = scores_at_t[dst_id].item()
+                # Get node scores at the specific timestamp of the edge
+                scores_at_t = node_scores_per_t.get(t_val, torch.zeros(len(nodes)))
+                
+                # Handle unknown nodes (ID = -1)
+                src_score = scores_at_t[src_id].item() if src_id >= 0 else 0.0
+                dst_score = scores_at_t[dst_id].item() if dst_id >= 0 else 0.0
 
-            # Combine node scores to get an edge score (e.g., max or sum)
-            edge_score = max(src_score, dst_score)
-            edge_anomaly_scores.append(edge_score)
+                # Combine node scores to get an edge score (e.g., max or sum)
+                edge_score = max(src_score, dst_score)
+                edge_anomaly_scores.append(edge_score)
 
-    test_dataset['anomaly_score'] = edge_anomaly_scores
+        test_dataset['anomaly_score'] = edge_anomaly_scores
 
-    # 4. Identify anomalies based on a threshold
-    # Example: set threshold as the 95th percentile of scores
-    if not test_dataset.empty:
-        score_threshold = test_dataset['anomaly_score'].quantile(0.95)
-        anomalous_edges = test_dataset[test_dataset['anomaly_score'] > score_threshold]
+        # 4. Identify anomalies based on a threshold
+        # Example: set threshold as the 95th percentile of scores
+        if not test_dataset.empty:
+            score_threshold = test_dataset['anomaly_score'].quantile(0.95)
+            anomalous_edges = test_dataset[test_dataset['anomaly_score'] > score_threshold]
 
-        print("\n--- Anomaly Detection Results on Unclean Data ---")
-        print(f"Score threshold (95th percentile): {score_threshold:.4f}")
-        print(f"Found {len(anomalous_edges)} potential anomalous edges.")
-        if not anomalous_edges.empty:
-            print("Top 5 most anomalous edges:")
-            print(anomalous_edges.sort_values('anomaly_score', ascending=False).head())
-
-# anomaly_scores is a list of tensors per time step
+            print("\n--- Anomaly Detection Results on Unclean Data ---")
+            print(f"Score threshold (95th percentile): {score_threshold:.4f}")
+            print(f"Found {len(anomalous_edges)} potential anomalous edges.")
+            if not anomalous_edges.empty:
+                print("Top 5 most anomalous edges:")
+                print(anomalous_edges.sort_values('anomaly_score', ascending=False).head())# anomaly_scores is a list of tensors per time step
